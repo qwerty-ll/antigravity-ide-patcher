@@ -1,6 +1,6 @@
 # ========================================================
-# Antigravity IDE Restore Script for Windows
-# Restores main.js from main.js.bak
+# Universal Antigravity Restore Script for Windows
+# Restores any modified components from .bak files
 # ========================================================
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -23,67 +23,99 @@ function Log-Message {
         "SUCCESS" { Write-Host "  [+] $Message" -ForegroundColor Green }
         "WARN"    { Write-Host "  [!] $Message" -ForegroundColor Yellow }
         "ERROR"   { Write-Host "  [X] $Message" -ForegroundColor Red }
+        "HEADER"  { Write-Host "$Message" -ForegroundColor $Color }
         default   { Write-Host "  $Message" -ForegroundColor $Color }
     }
 }
 
-Log-Message "Поиск установки Antigravity IDE для отката..." -Level "INFO" -Color Cyan
+Log-Message "========================================================" -Level "HEADER" -Color Yellow
+Log-Message "   ОТКАТ И ВОССТАНОВЛЕНИЕ ИЗ БЭКАПОВ                    " -Level "HEADER" -Color Yellow
+Log-Message "========================================================" -Level "HEADER" -Color Yellow
+Write-Host ""
 
-$candidatePaths = @(
+# Закрытие запущенных процессов
+$procNames = @("Antigravity IDE", "Antigravity", "antigravity-ide", "antigravity", "language_server", "agy")
+$foundProcs = Get-Process -Name $procNames -ErrorAction SilentlyContinue
+if ($foundProcs) {
+    Log-Message "Завершение запущенных процессов Antigravity..." -Level "WARN"
+    foreach ($p in $foundProcs) {
+        try { $p | Stop-Process -Force -ErrorAction Stop } catch {}
+    }
+    Start-Sleep -Seconds 2
+}
+
+$restoredCount = 0
+
+function Restore-File {
+    param ([string]$OrigPath, [string]$Title)
+    $bak = "$OrigPath.bak"
+    if (Test-Path $bak -PathType Leaf) {
+        try {
+            Copy-Item -Path $bak -Destination $OrigPath -Force -ErrorAction Stop
+            Log-Message "[$Title] Успешно восстановлен из $bak" -Level "SUCCESS"
+            return $true
+        } catch {
+            Log-Message "[$Title] Ошибка восстановления: $_" -Level "ERROR"
+            return $false
+        }
+    }
+    return $false
+}
+
+# 1. IDE main.js
+$idePaths = @(
     (Join-Path $env:LOCALAPPDATA "Programs\Antigravity IDE\resources\app\out\main.js"),
     (Join-Path $env:ProgramFiles "Antigravity IDE\resources\app\out\main.js"),
-    (Join-Path ${env:ProgramFiles(x86)} "Antigravity IDE\resources\app\out\main.js"),
-    (Join-Path $env:USERPROFILE "AppData\Local\Programs\Antigravity IDE\resources\app\out\main.js")
+    (Join-Path ${env:ProgramFiles(x86)} "Antigravity IDE\resources\app\out\main.js")
 )
+foreach ($p in $idePaths) {
+    if (Restore-File $p "Antigravity IDE") { $restoredCount++ }
+}
 
-$targetJs = $null
-foreach ($path in $candidatePaths) {
-    if ($path -and (Test-Path -Path $path -PathType Leaf)) {
-        $targetJs = (Resolve-Path $path).Path
-        break
+# 2. 2.0 language_server.exe
+$mgrPaths = @(
+    (Join-Path $env:LOCALAPPDATA "Programs\Antigravity\resources\bin\language_server.exe"),
+    (Join-Path $env:ProgramFiles "Antigravity\resources\bin\language_server.exe"),
+    (Join-Path ${env:ProgramFiles(x86)} "Antigravity\resources\bin\language_server.exe")
+)
+foreach ($p in $mgrPaths) {
+    if (Restore-File $p "Antigravity 2.0") { $restoredCount++ }
+}
+
+# 3. CLI agy.exe
+$agyPaths = @(
+    (Join-Path $env:LOCALAPPDATA "agy\bin\agy.exe"),
+    (Join-Path $env:LOCALAPPDATA "Programs\agy\bin\agy.exe"),
+    (Join-Path $env:USERPROFILE ".gemini\bin\antigravity.exe")
+)
+foreach ($p in $agyPaths) {
+    if (Restore-File $p "Antigravity CLI") { $restoredCount++ }
+}
+
+# 4. VS Code extension
+$vscodeExtDir = Join-Path $env:USERPROFILE ".vscode\extensions"
+if (Test-Path $vscodeExtDir) {
+    $matches = Get-ChildItem -Path $vscodeExtDir -Directory -Filter "google.google-antigravity-*" -ErrorAction SilentlyContinue
+    foreach ($m in $matches) {
+        $p = Join-Path $m.FullName "out\extension.js"
+        if (Restore-File $p "VS Code Extension") { $restoredCount++ }
     }
-}
-
-if (-not $targetJs) {
-    $userInput = Read-Host "  Введите путь к main.js"
-    if ($userInput) { $targetJs = $userInput.Trim('"', "'", " ") }
-}
-
-if (-not $targetJs -or -not (Test-Path $targetJs)) {
-    Log-Message "Файл main.js не найден." -Level "ERROR"
-    exit 1
-}
-
-$backupPath = "$targetJs.bak"
-if (-not (Test-Path $backupPath -PathType Leaf)) {
-    Log-Message "Файл бэкапа не найден: $backupPath" -Level "ERROR"
-    exit 1
-}
-
-# Закрытие процессов
-$procs = Get-Process -Name @("Antigravity IDE", "Antigravity", "antigravity-ide") -ErrorAction SilentlyContinue
-if ($procs) {
-    Log-Message "Закрытие запущенных процессов Antigravity..." -Level "WARN"
-    $procs | Stop-Process -Force
-    Start-Sleep -Seconds 1
-}
-
-try {
-    Copy-Item -Path $backupPath -Destination $targetJs -Force -ErrorAction Stop
-    Log-Message "Оригинальный файл успешно восстановлен из бэкапа: $backupPath" -Level "SUCCESS"
-} catch {
-    Log-Message "Ошибка восстановления: $_" -Level "ERROR"
-    exit 1
 }
 
 # Очистка кэша
-$cacheFolders = @(
+$cacheDirs = @(
     (Join-Path $env:APPDATA "Antigravity IDE\CachedData"),
     (Join-Path $env:APPDATA "Antigravity IDE\Code Cache\js")
 )
-foreach ($dir in $cacheFolders) {
-    if (Test-Path $dir) {
-        Remove-Item -Path $dir -Recurse -Force -ErrorAction SilentlyContinue
-    }
+foreach ($cd in $cacheDirs) {
+    if (Test-Path $cd) { Remove-Item $cd -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Log-Message "Кэш компиляции очищен. Восстановление завершено!" -Level "SUCCESS"
+
+Write-Host ""
+if ($restoredCount -gt 0) {
+    Log-Message "Восстановление успешно завершено! Восстановлено компонентов: $restoredCount" -Level "SUCCESS"
+} else {
+    Log-Message "Файлы резервных копий (.bak) не обнаружены." -Level "WARN"
+}
+Log-Message "Лог отката записан в: $LogFile" -Level "INFO"
+Write-Host ""
