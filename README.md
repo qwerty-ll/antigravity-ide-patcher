@@ -41,10 +41,13 @@
 Если вам привычнее отдельный файл программы без скриптов:
 * Скачайте готовый **`Open_AG_Patcher_Windows.exe`** из официальных релизов:  
   👉 **[Скачать Open_AG_Patcher_Windows.exe](https://github.com/AvenCores/open-antigravity-patcher/releases/latest)**
-* Запустите файл от имени администратора и в появившемся меню нажмите клавишу `1`.
+* Запустите файл от имени администратора.
+* **Что нажимать в меню:**
+  * Нажмите **`1`** — если у вас **Antigravity IDE** (редактор кода).
+  * Нажмите **`2`** — если у вас обычный **Antigravity 2.0** (патчит `language_server.exe`).
 
 ### Вариант Б: Запуск через Python (Windows, macOS, Linux)
-В репозиторий также включены полные исходники мультиплатформенного патчера (поддерживает Antigravity IDE, Antigravity 2.0 language_server, agy CLI и VS Code):
+В репозиторий также включены полные исходники мультиплатформенного патчера (поддерживает Antigravity IDE, Antigravity 2.0, agy CLI и VS Code):
 ```bash
 # 1. Установите зависимости
 pip install -r requirements.txt
@@ -52,6 +55,16 @@ pip install -r requirements.txt
 # 2. Запустите интерактивное меню
 python main.py
 ```
+* В меню выберите:
+  * **`1`** — для **Antigravity IDE**
+  * **`2`** — для **Antigravity 2.0** (`language_server`)
+
+---
+
+## 🔍 В чем разница: Antigravity IDE vs Antigravity 2.0?
+
+* **Antigravity IDE** — полноценный редактор кода (на базе VS Code / Electron). Скрипт `patch.bat` в этом репозитории заточен именно под него (патчит `main.js`).
+* **Обычный Antigravity 2.0** — отдельное фоновое приложение/менеджер. Его движком является скомпилированный на Go бинарный файл `language_server.exe`. Для него используйте **`Open_AG_Patcher_Windows.exe` ➔ пункт `2`** (или `python main.py` ➔ пункт `2`).
 
 ---
 
