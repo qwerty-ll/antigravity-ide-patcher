@@ -1,0 +1,22 @@
+# Logs
+patch.log
+restore.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Backups
+*.bak
+*.bak-*
+*.tmp
