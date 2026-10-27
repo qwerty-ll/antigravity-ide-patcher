@@ -381,9 +381,8 @@ if ($cliTargetsToPatch.Count -gt 0) {
 
         if ($isWrapper) {
             Log-Message "Обнаружен agy-wrapper ($([math]::Round($fInfo.Length / 1MB, 2)) MB): $agyTarget" -Level "INFO" -Color Cyan
-            Log-Message "agy-wrapper — это загрузчик. Сам движок CLI (30-50 МБ) пока не скачан в versions/." -Level "WARN"
-            Log-Message "Подсказка: запустите 'agy' в терминале один раз, чтобы wrapper загрузил движок, затем перезапустите patch.bat." -Level "INFO"
-            $Summary["Antigravity CLI (agy)"] = "Только wrapper (движок еще не загружен)"
+            Log-Message "agy-wrapper — современный диспетчер CLI (патч eligibility ему не требуется, готов к работе)." -Level "SUCCESS"
+            $Summary["Antigravity CLI (agy)"] = "Готов к работе (agy-wrapper)"
             continue
         }
 
