@@ -8,6 +8,10 @@
 # Compatible with Windows PowerShell 5.1+ and PowerShell 7+
 # ========================================================
 
+param (
+    [string]$CustomTarget = ""
+)
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -313,26 +317,117 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 Log-Message "--- Проверка Antigravity CLI (agy.exe) ---" -Level "HEADER" -Color Yellow
 
+# Проверка сетевой доступности серверов Google
+Log-Message "Проверка сетевого доступа к серверам Google..." -Level "INFO"
+$googleOk = $false
+try {
+    $req = [System.Net.HttpWebRequest]::Create("https://antigravity.google")
+    $req.Timeout = 3000
+    $req.Method = "HEAD"
+    $resp = $req.GetResponse()
+    $resp.Close()
+    $googleOk = $true
+    Log-Message "Связь с серверами Google: доступна напрямую." -Level "SUCCESS"
+} catch {
+    Log-Message "Серверы Google недоступны напрямую без VPN (это стандартно для РФ)." -Level "WARN"
+}
+
+# Сигнатуры для CLI и движка
+$gateDefinitions = @(
+    @{
+        Desc      = "eligibility off (x64 near jump)"
+        Unpatched = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x80\x78\x08\x00\x0f\x85[\s\S]{4}'
+        Patched   = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x48\x85\xc0\x90\x0f\x85[\s\S]{4}'
+        Fix       = [byte[]]@(0x48, 0x85, 0xC0, 0x90)
+        Offset    = 9
+    },
+    @{
+        Desc      = "eligibility off (x64 short jump)"
+        Unpatched = '\x48\x85\xc0\x74[\s\S]\x80\x78\x08\x00(?:\x75[\s\S]|\x0f\x85[\s\S]{4})'
+        Patched   = '\x48\x85\xc0\x74[\s\S]\x48\x85\xc0\x90(?:\x75[\s\S]|\x0f\x85[\s\S]{4})'
+        Fix       = [byte[]]@(0x48, 0x85, 0xC0, 0x90)
+        Offset    = 5
+    },
+    @{
+        Desc      = "hasValidAuth=true (x64 engine/manager)"
+        Unpatched = '\x80\x78\x08\x00\x74[\s\S]\x48\x8b[\s\S]\x24[\s\S]\x48\x89[\s\S]\x60'
+        Patched   = '\xc6\x40\x08\x01\x90\x90\x48\x8b[\s\S]\x24[\s\S]\x48\x89[\s\S]\x60'
+        Fix       = [byte[]]@(0xC6, 0x40, 0x08, 0x01, 0x90, 0x90)
+        Offset    = 0
+    },
+    @{
+        Desc      = "eligibility off (arm64)"
+        Unpatched = '\x21\x00\x00\x35\x00\x00\x00\xb4\x01\x20\x40\x39\x01\x00\x00\x37'
+        Patched   = '\x21\x00\x00\x35\x00\x00\x00\xb4\x1f\x20\x03\xd5\x01\x00\x00\x37'
+        Fix       = [byte[]]@(0x1F, 0x20, 0x03, 0xD5)
+        Offset    = 8
+    },
+    @{
+        Desc      = "hasValidAuth=true (arm64 engine/manager)"
+        Unpatched = '\x03\x20\x40\x39[\x03\x23\x43\x63\x83\xa3\xc3\xe3][\s\S]{2}\x36(?:[\s\S]{4}){1,2}\x03\x10\x06\xa9'
+        Patched   = '\x23\x00\x80\x52\x03\x20\x00\x39(?:[\s\S]{4}){1,2}\x03\x10\x06\xa9'
+        Fix       = [byte[]]@(0x23, 0x00, 0x80, 0x52, 0x03, 0x20, 0x00, 0x39)
+        Offset    = 0
+    }
+)
+
 $rawAgyCandidates = @()
 
-# 1. Поиск в %LOCALAPPDATA%\agy (включая папку versions, куда agy-wrapper скачивает движок)
+# 0. Пользовательский путь из аргументов
+if ($CustomTarget -and (Test-Path $CustomTarget -PathType Leaf)) {
+    $rawAgyCandidates += (Resolve-Path $CustomTarget).Path
+}
+
+# 1. Сканирование %LOCALAPPDATA%\agy (включая папку versions)
 $agyRoot = Join-Path $env:LOCALAPPDATA "agy"
 if (Test-Path $agyRoot) {
-    $rawAgyCandidates += (Get-ChildItem -Path $agyRoot -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    Log-Message "Сканирование каталога: $agyRoot" -Level "INFO"
+    $allAgyItems = Get-ChildItem -Path $agyRoot -Recurse -ErrorAction SilentlyContinue
+    if ($allAgyItems) {
+        foreach ($item in $allAgyItems) {
+            if (-not $item.PSIsContainer) {
+                $rawAgyCandidates += $item.FullName
+                Log-Message "  Обнаружен файл: $($item.FullName) ($([math]::Round($item.Length / 1MB, 2)) MB)" -Level "INFO"
+            }
+        }
+    }
 }
 
-# 2. Поиск в ~/.gemini/bin/
-$geminiBin = Join-Path $env:USERPROFILE ".gemini\bin"
-if (Test-Path $geminiBin) {
-    $rawAgyCandidates += (Get-ChildItem -Path $geminiBin -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+# 2. Поиск в %USERPROFILE%\.gemini
+$geminiDir = Join-Path $env:USERPROFILE ".gemini"
+if (Test-Path $geminiDir) {
+    $rawAgyCandidates += (Get-ChildItem -Path $geminiDir -Recurse -Filter "*agy*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    $rawAgyCandidates += (Get-ChildItem -Path $geminiDir -Recurse -Filter "*antigravity*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 }
 
-# 3. Поиск в PATH и стандартных папках
-$whichAgy = Get-Command "agy.exe" -ErrorAction SilentlyContinue
-if ($whichAgy) { $rawAgyCandidates += $whichAgy.Source }
-$rawAgyCandidates += (Join-Path $env:LOCALAPPDATA "Programs\agy\bin\agy.exe")
+# 3. Поиск в других стандартных папках
+$additionalDirs = @(
+    (Join-Path $env:APPDATA "agy"),
+    (Join-Path $env:USERPROFILE ".antigravity"),
+    (Join-Path $env:USERPROFILE ".agy"),
+    (Join-Path $env:LOCALAPPDATA "Programs\agy"),
+    (Join-Path $env:USERPROFILE "scoop\apps\agy")
+)
+foreach ($dir in $additionalDirs) {
+    if (Test-Path $dir) {
+        $rawAgyCandidates += (Get-ChildItem -Path $dir -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    }
+}
 
-# Дедупликация путей
+# 4. Поиск в PATH
+foreach ($cmdName in @("agy.exe", "agy", "antigravity.exe", "antigravity")) {
+    $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { $rawAgyCandidates += $cmd.Source }
+}
+
+# 5. Поиск на диске D: (если есть)
+foreach ($dPath in @("D:\agy", "D:\antigravity", "D:\Programs\agy", "D:\яндекс загрузки")) {
+    if (Test-Path $dPath) {
+        $rawAgyCandidates += (Get-ChildItem -Path $dPath -Recurse -Filter "*agy*.exe" -Depth 3 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    }
+}
+
+# Дедупликация и фильтрация
 $uniqueAgy = @()
 $seenAgy = @{}
 foreach ($cand in $rawAgyCandidates) {
@@ -341,69 +436,74 @@ foreach ($cand in $rawAgyCandidates) {
         $key = $real.ToLower()
         if (-not $seenAgy.ContainsKey($key)) {
             $seenAgy[$key] = $true
-            $uniqueAgy += $real
+            if ($real -notlike "*.bak" -and $real -notlike "*.agybak" -and $real -notlike "*.tmp") {
+                $uniqueAgy += $real
+            }
         }
     }
 }
 
-# Разделяем на настоящие бинарники движка (>= 10 MB) и лаунчеры (agy-wrapper < 10 MB)
-$engineBinaries = @()
-$wrapperBinaries = @()
-foreach ($bin in $uniqueAgy) {
-    $len = (Get-Item $bin).Length
-    if ($len -ge 10MB) {
-        $engineBinaries += $bin
+# Сортировка: сначала крупные бинарники движка (>= 10 MB), затем лаунчеры
+$sortedAgy = $uniqueAgy | Sort-Object { (Get-Item $_).Length } -Descending
+
+$patchedAny = $false
+$wrapperCandidate = $null
+
+foreach ($target in $sortedAgy) {
+    $fInfo = Get-Item $target
+    $szMB = [math]::Round($fInfo.Length / 1MB, 2)
+    Log-Message "Анализ файла CLI: $target ($szMB MB)" -Level "INFO" -Color Cyan
+
+    # Пробуем применить каждую сигнатуру
+    $targetPatched = $false
+    foreach ($gate in $gateDefinitions) {
+        $res = Patch-BinaryGate -FilePath $target -ComponentTitle "Antigravity CLI" `
+            -UnpatchedPattern $gate.Unpatched -PatchedPattern $gate.Patched `
+            -ReplacementBytes $gate.Fix -Offset $gate.Offset -GateDesc $gate.Desc
+
+        if ($res -eq "patched" -or $res -eq "already_patched") {
+            $targetPatched = $true
+            $patchedAny = $true
+            if ($res -eq "patched") {
+                $Summary["Antigravity CLI (agy)"] = "Успешно пропатчен ($($gate.Desc))"
+            } elseif ($Summary["Antigravity CLI (agy)"] -ne "Успешно пропатчен") {
+                $Summary["Antigravity CLI (agy)"] = "Уже был пропатчен ($($gate.Desc))"
+            }
+            break
+        }
+    }
+
+    if (-not $targetPatched) {
+        if ($fInfo.Length -lt 10MB) {
+            $wrapperCandidate = $target
+        }
+    }
+}
+
+if (-not $patchedAny) {
+    if ($wrapperCandidate) {
+        Log-Message "========================================================" -Level "HEADER" -Color Yellow
+        Log-Message "ВНИМАНИЕ: Обнаружен только загрузчик agy-wrapper:" -Level "WARN" -Color Yellow
+        Log-Message "  Файл: $wrapperCandidate ($([math]::Round((Get-Item $wrapperCandidate).Length / 1MB, 2)) MB)" -Level "INFO"
+        Log-Message "Движок Antigravity CLI еще не скачан в versions/." -Level "WARN" -Color Yellow
+        Write-Host ""
+        Log-Message "ПОЧЕМУ AGY ПРОСИТ СКАЧАТЬ ДВИЖОК:" -Level "INFO" -Color White
+        Log-Message "  agy-wrapper — это компактный загрузчик от Google. При запуске 'agy' он обращается" -Level "INFO"
+        Log-Message "  к серверам Google для загрузки основного исполняемого движка (30-50 МБ)." -Level "INFO"
+        Log-Message "  В РФ сервера Google заблокированы провайдерами, поэтому без VPN загрузка не проходит!" -Level "WARN" -Color Yellow
+        Write-Host ""
+        Log-Message "ЧТО СДЕЛАТЬ ДЛЯ АКТИВАЦИИ CLI:" -Level "HEADER" -Color Green
+        Log-Message "  1. Включите VPN (Amnezia / Outline / V2Ray / ByeDPI) для всего ПК." -Level "SUCCESS"
+        Log-Message "  2. Откройте командную строку (cmd) и введите: agy" -Level "SUCCESS"
+        Log-Message "  3. Дождитесь, пока wrapper скачает движок в versions/." -Level "SUCCESS"
+        Log-Message "  4. Запустите patch.bat снова — патчер сразу снимет проверку лицензии!" -Level "SUCCESS"
+        Log-Message "  (Если движок уже есть на диске D: перетащите его прямо на patch.bat)" -Level "INFO"
+        Log-Message "========================================================" -Level "HEADER" -Color Yellow
+
+        $Summary["Antigravity CLI (agy)"] = "Требуется загрузка движка через VPN"
     } else {
-        $wrapperBinaries += $bin
+        Log-Message "Antigravity CLI (agy.exe) не обнаружен." -Level "INFO"
     }
-}
-
-$cliTargetsToPatch = @()
-if ($engineBinaries.Count -gt 0) {
-    $cliTargetsToPatch = $engineBinaries
-} elseif ($wrapperBinaries.Count -gt 0) {
-    $cliTargetsToPatch = $wrapperBinaries
-}
-
-if ($cliTargetsToPatch.Count -gt 0) {
-    # Сигнатуры для машинного кода
-    $cliX64Unpatched = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x80\x78\x08\x00\x0f\x85[\s\S]{4}'
-    $cliX64Patched   = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x48\x85\xc0\x90\x0f\x85[\s\S]{4}'
-    $cliX64Fix       = [byte[]]@(0x48, 0x85, 0xC0, 0x90)
-
-    $cliArm64Unpatched = '\x21\x00\x00\x35\x00\x00\x00\xb4\x01\x20\x40\x39\x01\x00\x00\x37'
-    $cliArm64Patched   = '\x21\x00\x00\x35\x00\x00\x00\xb4\x1f\x20\x03\xd5\x01\x00\x00\x37'
-    $cliArm64Fix       = [byte[]]@(0x1F, 0x20, 0x03, 0xD5)
-
-    foreach ($agyTarget in $cliTargetsToPatch) {
-        $fInfo = Get-Item $agyTarget
-        $isWrapper = ($fInfo.Length -lt 10MB)
-
-        if ($isWrapper) {
-            Log-Message "Обнаружен agy-wrapper ($([math]::Round($fInfo.Length / 1MB, 2)) MB): $agyTarget" -Level "INFO" -Color Cyan
-            Log-Message "agy-wrapper — современный диспетчер CLI (патч eligibility ему не требуется, готов к работе)." -Level "SUCCESS"
-            $Summary["Antigravity CLI (agy)"] = "Готов к работе (agy-wrapper)"
-            continue
-        }
-
-        Log-Message "Найден движок Antigravity CLI ($([math]::Round($fInfo.Length / 1MB, 2)) MB): $agyTarget" -Level "INFO" -Color Cyan
-
-        $resAgy = Patch-BinaryGate -FilePath $agyTarget -ComponentTitle "Antigravity CLI" `
-            -UnpatchedPattern $cliX64Unpatched -PatchedPattern $cliX64Patched `
-            -ReplacementBytes $cliX64Fix -Offset 9 -GateDesc "eligibility off (x64)"
-
-        if ($resAgy -eq "sig_not_found") {
-            $resAgy = Patch-BinaryGate -FilePath $agyTarget -ComponentTitle "Antigravity CLI" `
-                -UnpatchedPattern $cliArm64Unpatched -PatchedPattern $cliArm64Patched `
-                -ReplacementBytes $cliArm64Fix -Offset 8 -GateDesc "eligibility off (arm64)"
-        }
-
-        if ($resAgy -eq "patched") { $Summary["Antigravity CLI (agy)"] = "Успешно пропатчен" }
-        elseif ($resAgy -eq "already_patched") { $Summary["Antigravity CLI (agy)"] = "Уже был пропатчен" }
-        else { $Summary["Antigravity CLI (agy)"] = "Сигнатура не найдена" }
-    }
-} else {
-    Log-Message "Antigravity CLI (agy.exe) не обнаружен." -Level "INFO"
 }
 Write-Host ""
 

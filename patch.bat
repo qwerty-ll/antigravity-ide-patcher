@@ -9,7 +9,7 @@ echo   Universal Antigravity Patcher (Windows)
 echo ========================================================
 echo.
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0patch.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0patch.ps1" %*
 
 echo.
 pause
