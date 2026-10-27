@@ -313,50 +313,96 @@ Write-Host ""
 # ---------------------------------------------------------------------------
 Log-Message "--- Проверка Antigravity CLI (agy.exe) ---" -Level "HEADER" -Color Yellow
 
-$agyCandidates = @(
-    (Join-Path $env:LOCALAPPDATA "agy\bin\agy.exe"),
-    (Join-Path $env:LOCALAPPDATA "Programs\agy\bin\agy.exe"),
-    (Join-Path $env:USERPROFILE "AppData\Local\agy\bin\agy.exe"),
-    (Join-Path $env:USERPROFILE ".gemini\bin\antigravity.exe"),
-    (Join-Path $env:USERPROFILE ".gemini\bin\agy.exe")
-)
-$whichAgy = Get-Command "agy.exe" -ErrorAction SilentlyContinue
-if ($whichAgy) { $agyCandidates += $whichAgy.Source }
+$rawAgyCandidates = @()
 
-$agyTarget = $null
-foreach ($a in $agyCandidates) {
-    if ($a -and (Test-Path $a -PathType Leaf)) {
-        $agyTarget = (Resolve-Path $a).Path
-        break
+# 1. Поиск в %LOCALAPPDATA%\agy (включая папку versions, куда agy-wrapper скачивает движок)
+$agyRoot = Join-Path $env:LOCALAPPDATA "agy"
+if (Test-Path $agyRoot) {
+    $rawAgyCandidates += (Get-ChildItem -Path $agyRoot -Recurse -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+}
+
+# 2. Поиск в ~/.gemini/bin/
+$geminiBin = Join-Path $env:USERPROFILE ".gemini\bin"
+if (Test-Path $geminiBin) {
+    $rawAgyCandidates += (Get-ChildItem -Path $geminiBin -Filter "*.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+}
+
+# 3. Поиск в PATH и стандартных папках
+$whichAgy = Get-Command "agy.exe" -ErrorAction SilentlyContinue
+if ($whichAgy) { $rawAgyCandidates += $whichAgy.Source }
+$rawAgyCandidates += (Join-Path $env:LOCALAPPDATA "Programs\agy\bin\agy.exe")
+
+# Дедупликация путей
+$uniqueAgy = @()
+$seenAgy = @{}
+foreach ($cand in $rawAgyCandidates) {
+    if ($cand -and (Test-Path $cand -PathType Leaf)) {
+        $real = (Resolve-Path $cand).Path
+        $key = $real.ToLower()
+        if (-not $seenAgy.ContainsKey($key)) {
+            $seenAgy[$key] = $true
+            $uniqueAgy += $real
+        }
     }
 }
 
-if ($agyTarget) {
-    Log-Message "Найден Antigravity CLI: $agyTarget" -Level "INFO" -Color Cyan
+# Разделяем на настоящие бинарники движка (>= 10 MB) и лаунчеры (agy-wrapper < 10 MB)
+$engineBinaries = @()
+$wrapperBinaries = @()
+foreach ($bin in $uniqueAgy) {
+    $len = (Get-Item $bin).Length
+    if ($len -ge 10MB) {
+        $engineBinaries += $bin
+    } else {
+        $wrapperBinaries += $bin
+    }
+}
 
-    # x64: test rax,rax ; je eligible ; cmp byte[rax+8],0 -> test rax,rax ; nop
+$cliTargetsToPatch = @()
+if ($engineBinaries.Count -gt 0) {
+    $cliTargetsToPatch = $engineBinaries
+} elseif ($wrapperBinaries.Count -gt 0) {
+    $cliTargetsToPatch = $wrapperBinaries
+}
+
+if ($cliTargetsToPatch.Count -gt 0) {
+    # Сигнатуры для машинного кода
     $cliX64Unpatched = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x80\x78\x08\x00\x0f\x85[\s\S]{4}'
     $cliX64Patched   = '\x48\x85\xc0\x0f\x84[\s\S]{4}\x48\x85\xc0\x90\x0f\x85[\s\S]{4}'
     $cliX64Fix       = [byte[]]@(0x48, 0x85, 0xC0, 0x90)
 
-    # arm64:
     $cliArm64Unpatched = '\x21\x00\x00\x35\x00\x00\x00\xb4\x01\x20\x40\x39\x01\x00\x00\x37'
     $cliArm64Patched   = '\x21\x00\x00\x35\x00\x00\x00\xb4\x1f\x20\x03\xd5\x01\x00\x00\x37'
     $cliArm64Fix       = [byte[]]@(0x1F, 0x20, 0x03, 0xD5)
 
-    $resAgy = Patch-BinaryGate -FilePath $agyTarget -ComponentTitle "Antigravity CLI" `
-        -UnpatchedPattern $cliX64Unpatched -PatchedPattern $cliX64Patched `
-        -ReplacementBytes $cliX64Fix -Offset 9 -GateDesc "eligibility off (x64)"
+    foreach ($agyTarget in $cliTargetsToPatch) {
+        $fInfo = Get-Item $agyTarget
+        $isWrapper = ($fInfo.Length -lt 10MB)
 
-    if ($resAgy -eq "sig_not_found") {
+        if ($isWrapper) {
+            Log-Message "Обнаружен agy-wrapper ($([math]::Round($fInfo.Length / 1MB, 2)) MB): $agyTarget" -Level "INFO" -Color Cyan
+            Log-Message "agy-wrapper — это загрузчик. Сам движок CLI (30-50 МБ) пока не скачан в versions/." -Level "WARN"
+            Log-Message "Подсказка: запустите 'agy' в терминале один раз, чтобы wrapper загрузил движок, затем перезапустите patch.bat." -Level "INFO"
+            $Summary["Antigravity CLI (agy)"] = "Только wrapper (движок еще не загружен)"
+            continue
+        }
+
+        Log-Message "Найден движок Antigravity CLI ($([math]::Round($fInfo.Length / 1MB, 2)) MB): $agyTarget" -Level "INFO" -Color Cyan
+
         $resAgy = Patch-BinaryGate -FilePath $agyTarget -ComponentTitle "Antigravity CLI" `
-            -UnpatchedPattern $cliArm64Unpatched -PatchedPattern $cliArm64Patched `
-            -ReplacementBytes $cliArm64Fix -Offset 8 -GateDesc "eligibility off (arm64)"
-    }
+            -UnpatchedPattern $cliX64Unpatched -PatchedPattern $cliX64Patched `
+            -ReplacementBytes $cliX64Fix -Offset 9 -GateDesc "eligibility off (x64)"
 
-    if ($resAgy -eq "patched") { $Summary["Antigravity CLI (agy)"] = "Успешно пропатчен" }
-    elseif ($resAgy -eq "already_patched") { $Summary["Antigravity CLI (agy)"] = "Уже был пропатчен" }
-    else { $Summary["Antigravity CLI (agy)"] = "Ошибка ($resAgy)" }
+        if ($resAgy -eq "sig_not_found") {
+            $resAgy = Patch-BinaryGate -FilePath $agyTarget -ComponentTitle "Antigravity CLI" `
+                -UnpatchedPattern $cliArm64Unpatched -PatchedPattern $cliArm64Patched `
+                -ReplacementBytes $cliArm64Fix -Offset 8 -GateDesc "eligibility off (arm64)"
+        }
+
+        if ($resAgy -eq "patched") { $Summary["Antigravity CLI (agy)"] = "Успешно пропатчен" }
+        elseif ($resAgy -eq "already_patched") { $Summary["Antigravity CLI (agy)"] = "Уже был пропатчен" }
+        else { $Summary["Antigravity CLI (agy)"] = "Сигнатура не найдена" }
+    }
 } else {
     Log-Message "Antigravity CLI (agy.exe) не обнаружен." -Level "INFO"
 }
